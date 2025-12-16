@@ -37,8 +37,12 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve uploaded files
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+// Serve uploaded files with CORS headers
+app.use('/uploads', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  next();
+}, express.static(path.join(__dirname, '../uploads')));
 
 // API Routes
 app.use('/api', routes);
@@ -57,7 +61,7 @@ app.use((req, res) => {
 // Start server
 const PORT = process.env.PORT || 5000;
 
-server.listen(PORT,"10.10.7.62", () => {
+server.listen(PORT, "10.10.7.62", () => {
   console.log(`
   🚀 Server is running!
   📡 API: http://localhost:${PORT}/api
