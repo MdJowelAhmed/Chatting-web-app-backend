@@ -1,11 +1,13 @@
 import User from '../models/User.js';
 import Message from '../models/Message.js';
 import Conversation from '../models/Conversation.js';
+import Call from '../models/Call.js';
 import { socketAuth } from '../middleware/auth.js';
 
 // Store active connections
 const onlineUsers = new Map(); // userId -> socketId
 const userSockets = new Map(); // socketId -> userId
+const activeCalls = new Map(); // callId -> { participants: Set<userId>, type: string }
 
 export const setupSocketHandlers = (io) => {
   // Apply authentication middleware
@@ -152,10 +154,32 @@ export const setupSocketHandlers = (io) => {
 
     // ============ WEBRTC SIGNALING EVENTS ============
 
-    // Handle call initiation
+    // Handle call initiation - sends offer to callee
     socket.on('call-user', async ({ userToCall, signalData, callType, callId }) => {
+      console.log(`📞 Call from ${socket.user.name} to ${userToCall}, type: ${callType}`);
+      
       const targetSocketId = onlineUsers.get(userToCall);
+      
       if (targetSocketId) {
+        // Check if target user is already in a call
+        for (const [activeCallId, callData] of activeCalls.entries()) {
+          if (callData.participants.has(userToCall)) {
+            console.log(`📵 User ${userToCall} is busy on another call`);
+            socket.emit('user-busy', { userId: userToCall, callId });
+            return;
+          }
+        }
+
+        // Store active call
+        if (!activeCalls.has(callId)) {
+          activeCalls.set(callId, {
+            participants: new Set([userId]),
+            type: callType,
+          });
+        }
+        activeCalls.get(callId).participants.add(userToCall);
+
+        // Send incoming call signal to the target user
         io.to(targetSocketId).emit('incoming-call-signal', {
           signal: signalData,
           from: userId,
@@ -164,26 +188,58 @@ export const setupSocketHandlers = (io) => {
           callType,
           callId,
         });
+        
+        console.log(`✅ Call signal sent to ${userToCall}`);
       } else {
+        console.log(`📵 User ${userToCall} is offline`);
         socket.emit('user-unavailable', { userId: userToCall });
+        
+        // Update call status if exists
+        if (callId) {
+          try {
+            await Call.findByIdAndUpdate(callId, { status: 'missed' });
+          } catch (error) {
+            console.error('Error updating call status:', error);
+          }
+        }
       }
     });
 
-    // Handle call answer
-    socket.on('answer-call', ({ signal, to, callId }) => {
+    // Handle call answer - sends answer back to caller
+    socket.on('answer-call', async ({ signal, to, callId }) => {
+      console.log(`📞 Call answered by ${socket.user.name}, sending to ${to}`);
+      
       const targetSocketId = onlineUsers.get(to);
+      
       if (targetSocketId) {
         io.to(targetSocketId).emit('call-accepted', {
           signal,
           from: userId,
           callId,
         });
+        
+        console.log(`✅ Answer signal sent to ${to}`);
+        
+        // Update call status
+        if (callId) {
+          try {
+            await Call.findByIdAndUpdate(callId, { 
+              status: 'ongoing',
+              startedAt: new Date(),
+            });
+          } catch (error) {
+            console.error('Error updating call status:', error);
+          }
+        }
       }
     });
 
-    // Handle ICE candidates
+    // Handle ICE candidates - trickle ICE
     socket.on('ice-candidate', ({ candidate, to }) => {
+      console.log(`🧊 ICE candidate from ${userId} to ${to}`);
+      
       const targetSocketId = onlineUsers.get(to);
+      
       if (targetSocketId) {
         io.to(targetSocketId).emit('ice-candidate', {
           candidate,
@@ -193,35 +249,68 @@ export const setupSocketHandlers = (io) => {
     });
 
     // Handle call rejection
-    socket.on('reject-call', ({ to, callId }) => {
+    socket.on('reject-call', async ({ to, callId }) => {
+      console.log(`❌ Call rejected by ${socket.user.name}`);
+      
       const targetSocketId = onlineUsers.get(to);
+      
       if (targetSocketId) {
         io.to(targetSocketId).emit('call-rejected', {
           from: userId,
           callId,
         });
       }
+
+      // Clean up active call
+      if (activeCalls.has(callId)) {
+        activeCalls.delete(callId);
+      }
+
+      // Update call status
+      if (callId) {
+        try {
+          await Call.findByIdAndUpdate(callId, { status: 'rejected' });
+        } catch (error) {
+          console.error('Error updating call status:', error);
+        }
+      }
     });
 
     // Handle call end
-    socket.on('end-call', ({ to, callId }) => {
+    socket.on('end-call', async ({ to, callId }) => {
+      console.log(`📴 Call ended by ${socket.user.name}`);
+      
       const targetSocketId = onlineUsers.get(to);
+      
       if (targetSocketId) {
         io.to(targetSocketId).emit('call-ended', {
           from: userId,
           callId,
         });
       }
+
+      // Clean up active call
+      if (activeCalls.has(callId)) {
+        activeCalls.delete(callId);
+      }
     });
 
     // Handle busy status
-    socket.on('user-busy', ({ to, callId }) => {
+    socket.on('user-busy', async ({ to, callId }) => {
+      console.log(`📵 User ${socket.user.name} is busy`);
+      
       const targetSocketId = onlineUsers.get(to);
+      
       if (targetSocketId) {
         io.to(targetSocketId).emit('user-busy', {
           from: userId,
           callId,
         });
+      }
+
+      // Clean up active call
+      if (activeCalls.has(callId)) {
+        activeCalls.delete(callId);
       }
     });
 
@@ -229,6 +318,8 @@ export const setupSocketHandlers = (io) => {
 
     // Join a call room
     socket.on('join-call-room', ({ roomId }) => {
+      console.log(`👥 ${socket.user.name} joined call room ${roomId}`);
+      
       socket.join(`call:${roomId}`);
       socket.to(`call:${roomId}`).emit('user-joined-call', {
         userId,
@@ -239,6 +330,8 @@ export const setupSocketHandlers = (io) => {
 
     // Leave a call room
     socket.on('leave-call-room', ({ roomId }) => {
+      console.log(`👋 ${socket.user.name} left call room ${roomId}`);
+      
       socket.leave(`call:${roomId}`);
       socket.to(`call:${roomId}`).emit('user-left-call', {
         userId,
@@ -249,6 +342,7 @@ export const setupSocketHandlers = (io) => {
     // Group call signaling
     socket.on('group-call-signal', ({ roomId, userToSignal, signal }) => {
       const targetSocketId = onlineUsers.get(userToSignal);
+      
       if (targetSocketId) {
         io.to(targetSocketId).emit('group-call-signal', {
           signal,
@@ -262,6 +356,7 @@ export const setupSocketHandlers = (io) => {
     // Group call return signal
     socket.on('group-call-return-signal', ({ to, signal }) => {
       const targetSocketId = onlineUsers.get(to);
+      
       if (targetSocketId) {
         io.to(targetSocketId).emit('group-call-signal-returned', {
           signal,
@@ -274,6 +369,8 @@ export const setupSocketHandlers = (io) => {
 
     socket.on('screen-share-started', ({ conversationId, roomId }) => {
       const room = roomId ? `call:${roomId}` : `conversation:${conversationId}`;
+      console.log(`🖥️ ${socket.user.name} started screen sharing`);
+      
       socket.to(room).emit('screen-share-started', {
         userId,
         userName: socket.user.name,
@@ -282,6 +379,8 @@ export const setupSocketHandlers = (io) => {
 
     socket.on('screen-share-stopped', ({ conversationId, roomId }) => {
       const room = roomId ? `call:${roomId}` : `conversation:${conversationId}`;
+      console.log(`🖥️ ${socket.user.name} stopped screen sharing`);
+      
       socket.to(room).emit('screen-share-stopped', {
         userId,
       });
@@ -306,6 +405,38 @@ export const setupSocketHandlers = (io) => {
       // Remove from maps
       onlineUsers.delete(userId);
       userSockets.delete(socket.id);
+
+      // Clean up any active calls for this user
+      for (const [callId, callData] of activeCalls.entries()) {
+        if (callData.participants.has(userId)) {
+          // Notify other participants
+          callData.participants.forEach((participantId) => {
+            if (participantId !== userId) {
+              const participantSocketId = onlineUsers.get(participantId);
+              if (participantSocketId) {
+                io.to(participantSocketId).emit('call-ended', {
+                  from: userId,
+                  callId,
+                  reason: 'disconnect',
+                });
+              }
+            }
+          });
+          
+          // Remove from active calls
+          activeCalls.delete(callId);
+          
+          // Update call status in database
+          try {
+            await Call.findByIdAndUpdate(callId, { 
+              status: 'ended',
+              endedAt: new Date(),
+            });
+          } catch (error) {
+            console.error('Error updating call on disconnect:', error);
+          }
+        }
+      }
 
       // Update user status
       await User.findByIdAndUpdate(userId, {
@@ -340,3 +471,7 @@ export const getUserSocketId = (userId) => {
   return onlineUsers.get(userId);
 };
 
+// Helper function to get active calls
+export const getActiveCalls = () => {
+  return activeCalls;
+};
