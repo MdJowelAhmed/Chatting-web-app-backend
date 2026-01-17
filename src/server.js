@@ -43,6 +43,10 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 // API Routes
 app.use('/api', routes);
 
+app.get('/', (req, res) => {
+  res.send('Hello World!');
+});
+
 // Error handling middleware
 app.use(errorHandler);
 
@@ -53,6 +57,8 @@ app.use((req, res) => {
     message: 'Route not found',
   });
 });
+
+
 
 // Start server
 const PORT = process.env.PORT || 5000;
