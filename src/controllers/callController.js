@@ -64,8 +64,8 @@ export const initiateCall = async (req, res, next) => {
       roomId,
     });
 
-    await call.populate('caller', 'name avatar');
-    await call.populate('participants.user', 'name avatar socketId');
+    await call.populate('caller', 'name email avatar');
+    await call.populate('participants.user', 'name email avatar socketId');
 
     // Emit call invitation to participants
     const io = getIO();
@@ -77,6 +77,7 @@ export const initiateCall = async (req, res, next) => {
           caller: {
             _id: req.user._id,
             name: req.user.name,
+            email: req.user.email,
             avatar: req.user.avatar,
           },
         });
@@ -98,8 +99,8 @@ export const initiateCall = async (req, res, next) => {
 export const acceptCall = async (req, res, next) => {
   try {
     const call = await Call.findById(req.params.callId)
-      .populate('caller', 'name avatar socketId')
-      .populate('participants.user', 'name avatar socketId');
+      .populate('caller', 'name email avatar socketId')
+      .populate('participants.user', 'name email avatar socketId');
 
     if (!call) {
       return res.status(404).json({
@@ -140,6 +141,7 @@ export const acceptCall = async (req, res, next) => {
         acceptedBy: {
           _id: req.user._id,
           name: req.user.name,
+          email: req.user.email,
           avatar: req.user.avatar,
         },
       });
@@ -160,8 +162,8 @@ export const acceptCall = async (req, res, next) => {
 export const rejectCall = async (req, res, next) => {
   try {
     const call = await Call.findById(req.params.callId)
-      .populate('caller', 'name avatar socketId')
-      .populate('participants.user', 'name avatar socketId');
+      .populate('caller', 'name email avatar socketId')
+      .populate('participants.user', 'name email avatar socketId');
 
     if (!call) {
       return res.status(404).json({
@@ -292,8 +294,8 @@ export const getCallHistory = async (req, res, next) => {
         { 'participants.user': req.user._id },
       ],
     })
-      .populate('caller', 'name avatar')
-      .populate('participants.user', 'name avatar')
+      .populate('caller', 'name email avatar')
+      .populate('participants.user', 'name email avatar')
       .populate('conversation', 'type groupName')
       .sort({ createdAt: -1 })
       .skip(skip)
@@ -333,8 +335,8 @@ export const getActiveCall = async (req, res, next) => {
       ],
       status: { $in: ['ringing', 'ongoing'] },
     })
-      .populate('caller', 'name avatar')
-      .populate('participants.user', 'name avatar');
+      .populate('caller', 'name email avatar')
+      .populate('participants.user', 'name email avatar');
 
     res.status(200).json({
       success: true,

@@ -7,7 +7,19 @@ import { socketAuth } from '../middleware/auth.js';
 // Store active connections
 const onlineUsers = new Map(); // userId -> socketId
 const userSockets = new Map(); // socketId -> userId
-const activeCalls = new Map(); // callId -> { participants: Set<userId>, type: string }
+const activeCalls = new Map(); // callId -> { participants: Set<userId>, type: string, createdAt: number }
+
+// Cleanup stale calls every 5 minutes (calls older than 30 minutes are considered stale)
+const CALL_TTL = 30 * 60 * 1000; // 30 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [callId, callData] of activeCalls.entries()) {
+    if (callData.createdAt && (now - callData.createdAt) > CALL_TTL) {
+      console.log(`🧹 Cleaning up stale call ${callId} (age: ${Math.round((now - callData.createdAt) / 60000)} minutes)`);
+      activeCalls.delete(callId);
+    }
+  }
+}, 5 * 60 * 1000); // Run every 5 minutes
 
 export const setupSocketHandlers = (io) => {
   // Apply authentication middleware
@@ -15,7 +27,7 @@ export const setupSocketHandlers = (io) => {
 
   io.on('connection', async (socket) => {
     const userId = socket.user._id.toString();
-    console.log(`🟢 User connected: ${socket.user.name} (${userId})`);
+    console.log(`🟢 User connected: ${socket.user.email} (${userId})`);
 
     // Store user's socket
     onlineUsers.set(userId, socket.id);
@@ -69,7 +81,7 @@ export const setupSocketHandlers = (io) => {
         await conversation.save();
 
         // Populate message
-        await message.populate('sender', 'name avatar');
+        await message.populate('sender', 'name email avatar');
         await message.populate('replyTo', 'content type sender');
 
         // Emit to conversation room
@@ -105,7 +117,7 @@ export const setupSocketHandlers = (io) => {
       socket.to(`conversation:${conversationId}`).emit('user-typing', {
         conversationId,
         userId,
-        userName: socket.user.name,
+        userName: socket.user.email,
       });
     });
 
@@ -156,17 +168,28 @@ export const setupSocketHandlers = (io) => {
 
     // Handle call initiation - sends offer to callee
     socket.on('call-user', async ({ userToCall, signalData, callType, callId }) => {
-      console.log(`📞 Call from ${socket.user.name} to ${userToCall}, type: ${callType}`);
-      
+      console.log(`📞 Call from ${socket.user.email} to ${userToCall}, type: ${callType}`);
+
       const targetSocketId = onlineUsers.get(userToCall);
-      
+
       if (targetSocketId) {
-        // Check if target user is already in a call
+        // Check if target user is already in a call (excluding current call)
         for (const [activeCallId, callData] of activeCalls.entries()) {
+          // Skip if this is the same call being initiated
+          if (activeCallId === callId) continue;
+
           if (callData.participants.has(userToCall)) {
-            console.log(`📵 User ${userToCall} is busy on another call`);
-            socket.emit('user-busy', { userId: userToCall, callId });
+            console.log(`📵 User ${userToCall} is busy on another call (${activeCallId})`);
+            socket.emit('user-busy', { from: userToCall, callId });
             return;
+          }
+        }
+
+        // Clean up any stale calls for the caller before adding new one
+        for (const [activeCallId, callData] of activeCalls.entries()) {
+          if (activeCallId !== callId && callData.participants.has(userId)) {
+            console.log(`🧹 Cleaning up stale call ${activeCallId} for caller ${userId}`);
+            activeCalls.delete(activeCallId);
           }
         }
 
@@ -175,6 +198,7 @@ export const setupSocketHandlers = (io) => {
           activeCalls.set(callId, {
             participants: new Set([userId]),
             type: callType,
+            createdAt: Date.now(),
           });
         }
         activeCalls.get(callId).participants.add(userToCall);
@@ -183,17 +207,17 @@ export const setupSocketHandlers = (io) => {
         io.to(targetSocketId).emit('incoming-call-signal', {
           signal: signalData,
           from: userId,
-          callerName: socket.user.name,
+          callerName: socket.user.email,
           callerAvatar: socket.user.avatar,
           callType,
           callId,
         });
-        
+
         console.log(`✅ Call signal sent to ${userToCall}`);
       } else {
         console.log(`📵 User ${userToCall} is offline`);
         socket.emit('user-unavailable', { userId: userToCall });
-        
+
         // Update call status if exists
         if (callId) {
           try {
@@ -207,23 +231,23 @@ export const setupSocketHandlers = (io) => {
 
     // Handle call answer - sends answer back to caller
     socket.on('answer-call', async ({ signal, to, callId }) => {
-      console.log(`📞 Call answered by ${socket.user.name}, sending to ${to}`);
-      
+      console.log(`📞 Call answered by ${socket.user.email}, sending to ${to}`);
+
       const targetSocketId = onlineUsers.get(to);
-      
+
       if (targetSocketId) {
         io.to(targetSocketId).emit('call-accepted', {
           signal,
           from: userId,
           callId,
         });
-        
+
         console.log(`✅ Answer signal sent to ${to}`);
-        
+
         // Update call status
         if (callId) {
           try {
-            await Call.findByIdAndUpdate(callId, { 
+            await Call.findByIdAndUpdate(callId, {
               status: 'ongoing',
               startedAt: new Date(),
             });
@@ -237,9 +261,9 @@ export const setupSocketHandlers = (io) => {
     // Handle ICE candidates - trickle ICE
     socket.on('ice-candidate', ({ candidate, to }) => {
       console.log(`🧊 ICE candidate from ${userId} to ${to}`);
-      
+
       const targetSocketId = onlineUsers.get(to);
-      
+
       if (targetSocketId) {
         io.to(targetSocketId).emit('ice-candidate', {
           candidate,
@@ -250,10 +274,10 @@ export const setupSocketHandlers = (io) => {
 
     // Handle call rejection
     socket.on('reject-call', async ({ to, callId }) => {
-      console.log(`❌ Call rejected by ${socket.user.name}`);
-      
+      console.log(`❌ Call rejected by ${socket.user.email}`);
+
       const targetSocketId = onlineUsers.get(to);
-      
+
       if (targetSocketId) {
         io.to(targetSocketId).emit('call-rejected', {
           from: userId,
@@ -278,10 +302,10 @@ export const setupSocketHandlers = (io) => {
 
     // Handle call end
     socket.on('end-call', async ({ to, callId }) => {
-      console.log(`📴 Call ended by ${socket.user.name}`);
-      
+      console.log(`📴 Call ended by ${socket.user.email}`);
+
       const targetSocketId = onlineUsers.get(to);
-      
+
       if (targetSocketId) {
         io.to(targetSocketId).emit('call-ended', {
           from: userId,
@@ -297,10 +321,10 @@ export const setupSocketHandlers = (io) => {
 
     // Handle busy status
     socket.on('user-busy', async ({ to, callId }) => {
-      console.log(`📵 User ${socket.user.name} is busy`);
-      
+      console.log(`📵 User ${socket.user.email} is busy`);
+
       const targetSocketId = onlineUsers.get(to);
-      
+
       if (targetSocketId) {
         io.to(targetSocketId).emit('user-busy', {
           from: userId,
@@ -318,36 +342,36 @@ export const setupSocketHandlers = (io) => {
 
     // Join a call room
     socket.on('join-call-room', ({ roomId }) => {
-      console.log(`👥 ${socket.user.name} joined call room ${roomId}`);
-      
+      console.log(`👥 ${socket.user.email} joined call room ${roomId}`);
+
       socket.join(`call:${roomId}`);
       socket.to(`call:${roomId}`).emit('user-joined-call', {
         userId,
-        userName: socket.user.name,
+        userName: socket.user.email,
         userAvatar: socket.user.avatar,
       });
     });
 
     // Leave a call room
     socket.on('leave-call-room', ({ roomId }) => {
-      console.log(`👋 ${socket.user.name} left call room ${roomId}`);
-      
+      console.log(`👋 ${socket.user.email} left call room ${roomId}`);
+
       socket.leave(`call:${roomId}`);
       socket.to(`call:${roomId}`).emit('user-left-call', {
         userId,
-        userName: socket.user.name,
+        userName: socket.user.email,
       });
     });
 
     // Group call signaling
     socket.on('group-call-signal', ({ roomId, userToSignal, signal }) => {
       const targetSocketId = onlineUsers.get(userToSignal);
-      
+
       if (targetSocketId) {
         io.to(targetSocketId).emit('group-call-signal', {
           signal,
           from: userId,
-          fromName: socket.user.name,
+          fromName: socket.user.email,
           roomId,
         });
       }
@@ -356,7 +380,7 @@ export const setupSocketHandlers = (io) => {
     // Group call return signal
     socket.on('group-call-return-signal', ({ to, signal }) => {
       const targetSocketId = onlineUsers.get(to);
-      
+
       if (targetSocketId) {
         io.to(targetSocketId).emit('group-call-signal-returned', {
           signal,
@@ -369,18 +393,18 @@ export const setupSocketHandlers = (io) => {
 
     socket.on('screen-share-started', ({ conversationId, roomId }) => {
       const room = roomId ? `call:${roomId}` : `conversation:${conversationId}`;
-      console.log(`🖥️ ${socket.user.name} started screen sharing`);
-      
+      console.log(`🖥️ ${socket.user.email} started screen sharing`);
+
       socket.to(room).emit('screen-share-started', {
         userId,
-        userName: socket.user.name,
+        userName: socket.user.email,
       });
     });
 
     socket.on('screen-share-stopped', ({ conversationId, roomId }) => {
       const room = roomId ? `call:${roomId}` : `conversation:${conversationId}`;
-      console.log(`🖥️ ${socket.user.name} stopped screen sharing`);
-      
+      console.log(`🖥️ ${socket.user.email} stopped screen sharing`);
+
       socket.to(room).emit('screen-share-stopped', {
         userId,
       });
@@ -400,7 +424,7 @@ export const setupSocketHandlers = (io) => {
     // ============ DISCONNECT ============
 
     socket.on('disconnect', async () => {
-      console.log(`🔴 User disconnected: ${socket.user.name} (${userId})`);
+      console.log(`🔴 User disconnected: ${socket.user.email} (${userId})`);
 
       // Remove from maps
       onlineUsers.delete(userId);
@@ -422,13 +446,13 @@ export const setupSocketHandlers = (io) => {
               }
             }
           });
-          
+
           // Remove from active calls
           activeCalls.delete(callId);
-          
+
           // Update call status in database
           try {
-            await Call.findByIdAndUpdate(callId, { 
+            await Call.findByIdAndUpdate(callId, {
               status: 'ended',
               endedAt: new Date(),
             });

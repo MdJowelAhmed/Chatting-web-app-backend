@@ -35,7 +35,7 @@ export const getMessages = async (req, res, next) => {
       conversation: conversationId,
       deletedFor: { $ne: req.user._id },
     })
-      .populate('sender', 'name avatar')
+      .populate('sender', 'name email avatar')
       .populate('replyTo', 'content type sender')
       .sort({ createdAt: -1 })
       .skip(skip)
@@ -113,7 +113,7 @@ export const sendMessage = async (req, res, next) => {
     await conversation.save();
 
     // Populate message
-    await message.populate('sender', 'name avatar');
+    await message.populate('sender', 'name email avatar');
     await message.populate('replyTo', 'content type sender');
 
     // Emit to socket
@@ -189,7 +189,7 @@ export const sendFileMessage = async (req, res, next) => {
     await conversation.save();
 
     // Populate and emit
-    await message.populate('sender', 'name avatar');
+    await message.populate('sender', 'name email avatar');
     
     const io = getIO();
     io.to(`conversation:${conversationId}`).emit('new-message', message);
@@ -429,10 +429,11 @@ export const reactToMessage = async (req, res, next) => {
 
     await message.save();
 
-    // Emit to socket
+    // Emit to socket so all participants see updated reactions in real-time
     const io = getIO();
     io.to(`conversation:${message.conversation}`).emit('message-reaction', {
       messageId: message._id,
+      conversationId: message.conversation,
       reactions: message.reactions,
     });
 
@@ -489,7 +490,7 @@ export const getStarredMessages = async (req, res, next) => {
     const messages = await Message.find({
       starredBy: req.user._id,
     })
-      .populate('sender', 'name avatar')
+      .populate('sender', 'name email avatar')
       .populate('conversation', 'type groupName participants')
       .sort({ createdAt: -1 });
 
